@@ -6,6 +6,7 @@ use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreReceiptRequest;
 use App\Http\Resources\ReceiptResource;
 use App\Models\Receipt;
+use App\Services\CurrencyConverter;
 use App\Services\ReceiptExtractionService;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
@@ -16,6 +17,7 @@ class ReceiptController extends Controller
 {
     public function __construct(
         private readonly ReceiptExtractionService $extraction,
+        private readonly CurrencyConverter $converter,
     ) {}
 
     public function index(Request $request)
@@ -52,6 +54,7 @@ class ReceiptController extends Controller
                 'store_name' => $extracted['store_name'],
                 'date' => $extracted['date'],
                 'total' => $extracted['total'],
+                'total_myr' => $this->converter->toMyr($extracted['total'], $extracted['currency']),
                 'currency' => $extracted['currency'],
                 'category' => $extracted['category'],
                 'image_path' => $path,

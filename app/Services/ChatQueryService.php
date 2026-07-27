@@ -9,19 +9,9 @@ use Illuminate\Support\Facades\Log;
 
 class ChatQueryService
 {
-    /**
-     * Fixed intent list. The LLM's only job is to pick one of these and fill
-     * in parameters — it never writes a query and never sees the database.
-     * Adding a new question type means adding an intent here AND a handler
-     * below, not loosening what the model is allowed to output.
-     */
     private const INTENTS = [
-        'category_spend',   // "how much did I spend on food"
-        'total_spend',      // "how much have I spent this month"
-        'top_category',     // "what's my biggest spending category"
-        'savings',          // "how much have I saved"
-        'receipt_count',    // "how many receipts do I have"
-        'unknown',
+        'category_spend', 'total_spend', 'top_category',
+        'savings', 'receipt_count', 'unknown',
     ];
 
     public function __construct(
@@ -30,52 +20,32 @@ class ChatQueryService
 
     public function ask(string $message, ?string $month = null): string
     {
-        $month ??= now()->format('Y-m');
+        $intent = $this->classifyIntent($message);
 
-        $intent = $this->classifyIntent($message, $month);
+        // LLM-extracted month (user said "January 2018") wins over whatever
+        // month the frontend happened to be viewing; frontend's month wins
+        // over server "now" as a last resort
+        $effectiveMonth = $intent['month'] ?? $month ?? now()->format('Y-m');
 
         return match ($intent['intent']) {
-            'category_spend' => $this->handleCategorySpend($intent, $month),
-            'total_spend' => $this->handleTotalSpend($month),
-            'top_category' => $this->handleTopCategory($month),
-            'savings' => $this->handleSavings($month),
-            'receipt_count' => $this->handleReceiptCount($month),
+            'category_spend' => $this->handleCategorySpend($intent, $effectiveMonth),
+            'total_spend' => $this->handleTotalSpend($effectiveMonth),
+            'top_category' => $this->handleTopCategory($effectiveMonth),
+            'savings' => $this->handleSavings($effectiveMonth),
+            'receipt_count' => $this->handleReceiptCount($effectiveMonth),
             default => $this->handleUnknown(),
         };
     }
 
-    /**
-     * Calls the LLM with a strict instruction to return ONLY a JSON object
-     * shaped { "intent": ..., "category": string|null }. Falls back to
-     * "unknown" on any parse failure or disallowed value — fail closed, not
-     * open. This can reuse the same Lambda/LLM endpoint pattern as receipt
-     * extraction, or call the provider API directly; either way, this is the
-     * ONLY place natural language touches the classification step.
-     */
-    private function classifyIntent(string $message, string $month): array
+    private function classifyIntent(string $message): array
     {
         $endpoint = config('services.chat_llm.url');
         $apiKey = config('services.chat_llm.key');
-
-        $categories = implode(', ', ReceiptExtractionService::CATEGORIES);
-
-        $systemPrompt = <<<PROMPT
-        Classify the user's question about their personal expenses into exactly
-        one intent. Respond with ONLY a JSON object, no other text:
-
-        {"intent": "<one of: category_spend, total_spend, top_category, savings, receipt_count, unknown>",
-         "category": "<one of: {$categories}, or null>"}
-
-        Known categories: {$categories}
-        If the question doesn't clearly match one of these intents, use "unknown".
-        Never include commentary, explanation, or markdown — JSON only.
-        PROMPT;
 
         try {
             $response = Http::withToken($apiKey)
                 ->timeout(15)
                 ->post($endpoint, [
-                    'system' => $systemPrompt,
                     'message' => $message,
                 ]);
 
@@ -96,7 +66,12 @@ class ChatQueryService
             $category = null;
         }
 
-        return ['intent' => $intent, 'category' => $category];
+        $month = $parsed['month'] ?? null;
+        if ($month !== null && ! preg_match('/^\d{4}-\d{2}$/', $month)) {
+            $month = null;
+        }
+
+        return ['intent' => $intent, 'category' => $category, 'month' => $month];
     }
 
     private function handleCategorySpend(array $intent, string $month): string
@@ -105,32 +80,45 @@ class ChatQueryService
             return "Which category did you mean? For example: Groceries, Food & Drink, Transport, Health.";
         }
 
-        $total = Receipt::where('user_id', $this->userId)
+        $receipts = Receipt::where('user_id', $this->userId)
             ->inMonth($month)
             ->inCategory($intent['category'])
-            ->sum('total');
+            ->get();
 
-        $count = Receipt::where('user_id', $this->userId)
-            ->inMonth($month)
-            ->inCategory($intent['category'])
-            ->count();
-
-        if ($count === 0) {
+        if ($receipts->isEmpty()) {
             return "You have no {$intent['category']} receipts recorded for {$month}.";
         }
 
-        return sprintf(
+        $totalMyr = $receipts->sum('total_myr');
+        $count = $receipts->count();
+
+        $base = sprintf(
             "You've spent RM%s on %s this month, across %d receipt%s.",
-            number_format((float) $total, 2),
+            number_format($totalMyr, 2),
             $intent['category'],
             $count,
             $count === 1 ? '' : 's'
         );
+
+        // Only show the original-currency aside when there's exactly one receipt
+        // AND it wasn't already MYR — for 2+ receipts, mixing currencies in the
+        // sentence gets confusing fast, so the MYR total stays the single source
+        // of truth and the original amount is just a helpful footnote here.
+        if ($count === 1 && $receipts->first()->currency !== 'MYR') {
+            $original = $receipts->first();
+            $base .= sprintf(
+                ' (Originally %s%s.)',
+                $original->currency,
+                number_format((float) $original->total, 2)
+            );
+        }
+
+        return $base;
     }
 
     private function handleTotalSpend(string $month): string
     {
-        $total = Receipt::where('user_id', $this->userId)->inMonth($month)->sum('total');
+        $total = Receipt::where('user_id', $this->userId)->inMonth($month)->sum('total_myr');
 
         return sprintf("You've spent RM%s in total this month.", number_format((float) $total, 2));
     }
@@ -139,7 +127,7 @@ class ChatQueryService
     {
         $row = Receipt::where('user_id', $this->userId)
             ->inMonth($month)
-            ->selectRaw('category, SUM(total) as total')
+            ->selectRaw('category, SUM(total_myr) as total')
             ->groupBy('category')
             ->orderByDesc('total')
             ->first();
@@ -161,7 +149,7 @@ class ChatQueryService
             ->where('month', $month)
             ->value('amount') ?? 0);
 
-        $spending = (float) Receipt::where('user_id', $this->userId)->inMonth($month)->sum('total');
+        $spending = (float) Receipt::where('user_id', $this->userId)->inMonth($month)->sum('total_myr');
         $savings = $income - $spending;
 
         if ($income <= 0) {

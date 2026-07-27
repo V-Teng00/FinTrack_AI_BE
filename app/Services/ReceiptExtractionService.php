@@ -31,7 +31,7 @@ class ReceiptExtractionService
      * UX than an editable low-confidence result).
      */
     public const CATEGORIES = [
-        'Groceries', 'Food & Drink', 'Transport', 'Health',
+        'Groceries', 'Food & Drink', 'Transport', 'Health', 'Software & Subscriptions',
         'Utilities', 'Shopping', 'Entertainment', 'Uncategorized',
     ];
 
@@ -46,9 +46,11 @@ class ReceiptExtractionService
 
         try {
             $response = Http::withToken($apiKey)
-                ->timeout(25) // vision model calls are slow; fail clearly rather than hang the request
-                ->attach('image', file_get_contents($image->getRealPath()), $image->getClientOriginalName())
-                ->post($endpoint);
+                ->timeout(28)
+                ->post($endpoint, [
+                    'image_base64' => base64_encode(file_get_contents($image->getRealPath())),
+                    'mime_type' => $image->getMimeType(),
+                ]);
         } catch (\Throwable $e) {
             Log::error('Receipt extraction request failed', ['error' => $e->getMessage()]);
             throw new RuntimeException('Could not reach the extraction service.', previous: $e);

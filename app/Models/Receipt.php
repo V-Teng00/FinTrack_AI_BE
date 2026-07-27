@@ -17,6 +17,7 @@ class Receipt extends Model
         'store_name',
         'date',
         'total',
+        'total_myr',
         'currency',
         'category',
         'image_path',

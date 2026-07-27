@@ -15,24 +15,22 @@ class DashboardController extends Controller
         $month = $request->string('month')->toString() ?: now()->format('Y-m');
         $userId = $request->user()->id;
 
-        $totalSpending = (float) Receipt::where('user_id', $userId)->inMonth($month)->sum('total');
+        $totalSpending = (float) Receipt::where('user_id', $userId)->inMonth($month)->sum('total_myr');
 
         $income = (float) (Income::where('user_id', $userId)->where('month', $month)->value('amount') ?? 0);
 
         $byCategory = Receipt::where('user_id', $userId)
             ->inMonth($month)
-            ->selectRaw('category, SUM(total) as amount')
+            ->selectRaw('category, SUM(total_myr) as amount')
             ->groupBy('category')
             ->orderByDesc('amount')
             ->get()
             ->map(fn ($row) => ['category' => $row->category, 'amount' => (float) $row->amount])
             ->values();
 
-        // group by date in the DB (portable across drivers), then format the
-        // label in PHP rather than relying on a DB-specific date function
         $daily = Receipt::where('user_id', $userId)
             ->inMonth($month)
-            ->selectRaw('date, SUM(total) as amount')
+            ->selectRaw('date, SUM(total_myr) as amount')
             ->groupBy('date')
             ->orderBy('date')
             ->get()
