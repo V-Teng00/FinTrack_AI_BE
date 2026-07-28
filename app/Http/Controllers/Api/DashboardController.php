@@ -17,7 +17,9 @@ class DashboardController extends Controller
 
         $totalSpending = (float) Receipt::where('user_id', $userId)->inMonth($month)->sum('total_myr');
 
-        $income = (float) (Income::where('user_id', $userId)->where('month', $month)->value('amount') ?? 0);
+        $incomeSources = Income::where('user_id', $userId)->where('month', $month)->get();
+        $income = (float) $incomeSources->sum('amount');
+        $incomeUpdatedAt = $incomeSources->max('updated_at')?->toIso8601String();
 
         $byCategory = Receipt::where('user_id', $userId)
             ->inMonth($month)
@@ -43,6 +45,13 @@ class DashboardController extends Controller
         return response()->json([
             'total_spending' => $totalSpending,
             'income' => $income,
+            'income_updated_at' => $incomeUpdatedAt,
+            'income_sources' => $incomeSources->map(fn ($i) => [
+                'id' => $i->id,
+                'source' => $i->source,
+                'amount' => (float) $i->amount,
+                'notes' => $i->notes,
+            ]),
             'savings' => $income - $totalSpending,
             'by_category' => $byCategory,
             'daily' => $daily,
@@ -51,11 +60,31 @@ class DashboardController extends Controller
 
     public function setIncome(SetIncomeRequest $request)
     {
-        $income = Income::updateOrCreate(
-            ['user_id' => $request->user()->id, 'month' => $request->month],
-            ['amount' => $request->amount],
-        );
+        $income = $request->user()->incomes()->create([
+            'month' => $request->month,
+            'source' => $request->source,
+            'amount' => $request->amount,
+            'notes' => $request->notes,
+        ]);
 
-        return response()->json($income);
+        return response()->json($income, 201);
+    }
+
+    public function deleteIncome(Request $request, Income $income)
+    {
+        abort_unless($income->user_id === $request->user()->id, 403);
+        $income->delete();
+
+        return response()->json(null, 204);
+    }
+
+    public function incomeHistory(Request $request)
+    {
+        $incomes = Income::where('user_id', $request->user()->id)
+            ->orderByDesc('month')
+            ->orderByDesc('created_at')
+            ->get(['id', 'month', 'source', 'amount', 'notes', 'updated_at']);
+
+        return response()->json(['data' => $incomes]);
     }
 }

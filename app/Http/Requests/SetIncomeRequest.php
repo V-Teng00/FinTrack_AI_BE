@@ -15,7 +15,9 @@ class SetIncomeRequest extends FormRequest
     {
         return [
             'month' => ['required', 'regex:/^\d{4}-\d{2}$/'],
+            'source' => ['required', 'string', 'max:100'],
             'amount' => ['required', 'numeric', 'min:0', 'max:9999999.99'],
+            'notes' => ['nullable', 'string', 'max:500'],
         ];
     }
 }

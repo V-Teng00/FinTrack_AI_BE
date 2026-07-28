@@ -10,7 +10,7 @@ class Income extends Model
 {
     use HasFactory;
 
-    protected $fillable = ['user_id', 'month', 'amount'];
+    protected $fillable = ['user_id', 'month', 'source', 'amount', 'notes'];
 
     protected $casts = [
         'amount' => 'decimal:2',

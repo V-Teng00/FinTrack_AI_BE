@@ -14,6 +14,7 @@ class ReceiptResource extends JsonResource
             'store_name' => $this->store_name,
             'date' => $this->date->format('Y-m-d'),
             'total' => (float) $this->total,
+            'total_myr' => (float) $this->total_myr,
             'currency' => $this->currency,
             'category' => $this->category,
             'thumbnail_url' => $this->image_path

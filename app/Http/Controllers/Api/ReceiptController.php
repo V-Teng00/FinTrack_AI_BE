@@ -4,6 +4,7 @@ namespace App\Http\Controllers\Api;
 
 use App\Http\Controllers\Controller;
 use App\Http\Requests\StoreReceiptRequest;
+use App\Http\Requests\StoreManualReceiptRequest;
 use App\Http\Resources\ReceiptResource;
 use App\Models\Receipt;
 use App\Services\CurrencyConverter;
@@ -68,6 +69,25 @@ class ReceiptController extends Controller
 
             return $receipt;
         });
+
+        return new ReceiptResource($receipt);
+    }
+
+    public function storeManual(StoreManualReceiptRequest $request)
+    {
+        $totalMyr = $this->converter->toMyr((float) $request->total, $request->currency);
+
+        $receipt = $request->user()->receipts()->create([
+            'store_name' => $request->store_name,
+            'date' => $request->date,
+            'total' => $request->total,
+            'total_myr' => $totalMyr,
+            'currency' => $request->currency,
+            'category' => $request->category,
+            'image_path' => null,
+            'raw_extraction' => null,
+            'confidence' => null,
+        ]);
 
         return new ReceiptResource($receipt);
     }
