@@ -11,7 +11,7 @@ class ChatQueryService
 {
     private const INTENTS = [
         'category_spend', 'total_spend', 'top_category',
-        'savings', 'receipt_count', 'unknown',
+        'savings', 'receipt_count', 'recommendation', 'unknown',
     ];
 
     public function __construct(
@@ -21,6 +21,7 @@ class ChatQueryService
     public function ask(string $message, ?string $month = null): string
     {
         $intent = $this->classifyIntent($message);
+        \Log::info('CHAT DEBUG', ['intent_array' => $intent]);
 
         // LLM-extracted month (user said "January 2018") wins over whatever
         // month the frontend happened to be viewing; frontend's month wins
@@ -33,6 +34,7 @@ class ChatQueryService
             'top_category' => $this->handleTopCategory($effectiveMonth),
             'savings' => $this->handleSavings($effectiveMonth),
             'receipt_count' => $this->handleReceiptCount($effectiveMonth),
+            'recommendation' => $this->handleRecommendation($intent, $effectiveMonth),
             default => $this->handleUnknown(),
         };
     }
@@ -100,10 +102,6 @@ class ChatQueryService
             $count === 1 ? '' : 's'
         );
 
-        // Only show the original-currency aside when there's exactly one receipt
-        // AND it wasn't already MYR — for 2+ receipts, mixing currencies in the
-        // sentence gets confusing fast, so the MYR total stays the single source
-        // of truth and the original amount is just a helpful footnote here.
         if ($count === 1 && $receipts->first()->currency !== 'MYR') {
             $original = $receipts->first();
             $base .= sprintf(
@@ -179,5 +177,68 @@ class ChatQueryService
     {
         return "I can answer questions about your spending — try things like "
             . '"how much did I spend on food this month" or "what\'s my biggest category?"';
+    }
+
+    private function handleRecommendation(array $intent, string $month): string
+    {
+        $spending = (float) Receipt::where('user_id', $this->userId)->inMonth($month)->sum('total_myr');
+        $income = (float) (\App\Models\Income::where('user_id', $this->userId)->where('month', $month)->sum('amount'));
+
+        $facts = [
+            'month' => $month,
+            'total_spending_myr' => round($spending, 2),
+            'income_myr' => round($income, 2),
+        ];
+
+        if ($income > 0) {
+            $facts['savings_rate_percent'] = round((($income - $spending) / $income) * 100);
+        }
+
+        if ($intent['category']) {
+            $categorySpend = (float) \App\Models\Receipt::where('user_id', $this->userId)
+                ->inMonth($month)->inCategory($intent['category'])->sum('total_myr');
+            $facts['category'] = $intent['category'];
+            $facts['category_spending_myr'] = round($categorySpend, 2);
+
+            $goal = \App\Models\Goal::where('user_id', $this->userId)
+                ->where('category', $intent['category'])->value('monthly_limit');
+            if ($goal !== null) {
+                $facts['category_budget_myr'] = (float) $goal;
+            }
+        } else {
+            $byCategory = \App\Models\Receipt::where('user_id', $this->userId)
+                ->inMonth($month)
+                ->selectRaw('category, SUM(total_myr) as amount')
+                ->groupBy('category')->orderByDesc('amount')->first();
+            if ($byCategory) {
+                $facts['top_category'] = $byCategory->category;
+                $facts['top_category_spending_myr'] = round((float) $byCategory->amount, 2);
+            }
+
+            $goals = \App\Models\Goal::where('user_id', $this->userId)->get();
+            if ($goals->isNotEmpty()) {
+                $facts['budgets'] = $goals->map(fn ($g) => [
+                    'category' => $g->category,
+                    'monthly_limit_myr' => (float) $g->monthly_limit,
+                ]);
+            }
+        }
+
+        if ($spending === 0.0 && $income === 0.0) {
+            return "Add a few receipts and set your income so I can give you a grounded recommendation.";
+        }
+
+        try {
+            $response = Http::withToken(config('services.chat_llm.key'))
+                ->timeout(15)
+                ->post(str_replace('/chat-intent', '/chat-advise', config('services.chat_llm.url')), [
+                    'facts' => $facts,
+                ]);
+
+            return $response->json('reply') ?? "Keep tracking consistently — that's the biggest factor in staying on budget.";
+        } catch (\Throwable $e) {
+            Log::warning('Advice generation failed', ['error' => $e->getMessage()]);
+            return "Keep tracking consistently — that's the biggest factor in staying on budget.";
+        }
     }
 }

@@ -3,6 +3,7 @@
 use App\Http\Controllers\Api\AuthController;
 use App\Http\Controllers\Api\ChatController;
 use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\GoalController;
 use App\Http\Controllers\Api\ReceiptController;
 use Illuminate\Support\Facades\Route;
 
@@ -24,4 +25,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/dashboard/income-history', [DashboardController::class, 'incomeHistory']);
 
     Route::post('/chat', [ChatController::class, 'ask']);
+
+    Route::get('/goals', [GoalController::class, 'index']);
+    Route::post('/goals', [GoalController::class, 'store']);
+    Route::delete('/goals/{goal}', [GoalController::class, 'destroy']);
 });

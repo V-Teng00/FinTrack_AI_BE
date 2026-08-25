@@ -40,4 +40,9 @@ class User extends Authenticatable
     {
         return $this->hasMany(Income::class);
     }
+
+    public function goals(): HasMany
+    {
+        return $this->hasMany(Goal::class);
+    }
 }
