@@ -4,6 +4,7 @@ namespace App\Services;
 
 use App\Models\Receipt;
 use App\Services\ReceiptExtractionService;
+use Illuminate\Support\Facades\Cache;
 use Illuminate\Support\Facades\Http;
 use Illuminate\Support\Facades\Log;
 
@@ -11,8 +12,11 @@ class ChatQueryService
 {
     private const INTENTS = [
         'category_spend', 'total_spend', 'top_category',
-        'savings', 'receipt_count', 'recommendation', 'unknown',
+        'savings', 'receipt_count', 'recommendation', 'add_expense', 'unknown',
     ];
+
+    private const CONFIRM_WORDS = ['yes', 'y', 'confirm', 'ok', 'okay', 'add it', 'do it', 'yeah', 'yep', 'sure', 'confirmed'];
+    private const CANCEL_WORDS = ['no', 'n', 'cancel', 'nevermind', 'never mind', 'stop', 'don\'t', 'dont'];
 
     public function __construct(
         private readonly int $userId,
@@ -20,12 +24,16 @@ class ChatQueryService
 
     public function ask(string $message, ?string $month = null): string
     {
-        $intent = $this->classifyIntent($message);
-        \Log::info('CHAT DEBUG', ['intent_array' => $intent]);
+        // Confirm/cancel replies NEVER go through the LLM — this is the
+        // guardrail. Whether a write happens is decided here, in plain
+        // code, against a fixed word list. The model never sees this step.
+        $pendingResponse = $this->handlePendingAction($message);
+        if ($pendingResponse !== null) {
+            return $pendingResponse;
+        }
 
-        // LLM-extracted month (user said "January 2018") wins over whatever
-        // month the frontend happened to be viewing; frontend's month wins
-        // over server "now" as a last resort
+        $intent = $this->classifyIntent($message);
+
         $effectiveMonth = $intent['month'] ?? $month ?? now()->format('Y-m');
 
         return match ($intent['intent']) {
@@ -35,8 +43,102 @@ class ChatQueryService
             'savings' => $this->handleSavings($effectiveMonth),
             'receipt_count' => $this->handleReceiptCount($effectiveMonth),
             'recommendation' => $this->handleRecommendation($intent, $effectiveMonth),
+            'add_expense' => $this->handleAddExpense($intent),
             default => $this->handleUnknown(),
         };
+    }
+
+    private function cacheKey(): string
+    {
+        return "chat_pending_action:{$this->userId}";
+    }
+
+    /**
+     * Returns a response string if this message was handled as a
+     * confirm/cancel of a pending action, or null if there's no pending
+     * action (caller should proceed to normal classification).
+     */
+    private function handlePendingAction(string $message): ?string
+    {
+        $pending = Cache::get($this->cacheKey());
+        if (! $pending) {
+            return null;
+        }
+
+        $normalized = strtolower(trim($message));
+
+        if (in_array($normalized, self::CANCEL_WORDS, true)) {
+            Cache::forget($this->cacheKey());
+            return "Cancelled — nothing was added.";
+        }
+
+        if (in_array($normalized, self::CONFIRM_WORDS, true)) {
+            Cache::forget($this->cacheKey());
+            return $this->executePendingExpense($pending);
+        }
+
+        // Ambiguous reply while something's pending — don't guess, don't
+        // silently drop the pending action, just ask again explicitly.
+        return sprintf(
+            "You still have a pending expense: RM%s at %s (%s). Reply yes to confirm or no to cancel.",
+            number_format($pending['amount'], 2),
+            $pending['store'],
+            $pending['category']
+        );
+    }
+
+    private function handleAddExpense(array $intent): string
+    {
+        if (! $intent['expense_store'] || ! $intent['expense_amount']) {
+            return "To add an expense, tell me the store and amount — e.g. \"add RM50 food expense at KFC\".";
+        }
+
+        $category = $intent['category'] ?? 'Uncategorized';
+        $date = $intent['expense_date'] ?? now()->toDateString();
+
+        Cache::put($this->cacheKey(), [
+            'store' => $intent['expense_store'],
+            'amount' => $intent['expense_amount'],
+            'category' => $category,
+            'date' => $date,
+        ], now()->addMinutes(10));
+
+        return sprintf(
+            "Add RM%s at %s under %s for %s? Reply yes to confirm or no to cancel.",
+            number_format($intent['expense_amount'], 2),
+            $intent['expense_store'],
+            $category,
+            $date === now()->toDateString() ? 'today' : $date
+        );
+    }
+
+    /**
+     * The ONLY place a chat-originated expense actually gets written to the
+     * database — reached only after handlePendingAction() matched an
+     * explicit confirm word against plain code, never an LLM decision.
+     */
+    private function executePendingExpense(array $pending): string
+    {
+        $receipt = \App\Models\Receipt::create([
+            'user_id' => $this->userId,
+            'store_name' => $pending['store'],
+            'date' => $pending['date'],
+            'total' => $pending['amount'],
+            'total_myr' => $pending['amount'], // chat-added expenses are always entered in MYR
+            'currency' => 'MYR',
+            'category' => $pending['category'],
+            'image_path' => null,
+            'raw_extraction' => null,
+            'confidence' => null,
+        ]);
+
+        return sprintf(
+            "Added: RM%s at %s under %s. (id %d)",
+            number_format($receipt->total_myr, 2),
+            $receipt->store_name,
+            $receipt->category,
+            $receipt->id
+        );
     }
 
     private function classifyIntent(string $message): array
@@ -73,7 +175,21 @@ class ChatQueryService
             $month = null;
         }
 
-        return ['intent' => $intent, 'category' => $category, 'month' => $month];
+        $expenseStore = $parsed['expense_store'] ?? null;
+        $expenseAmount = isset($parsed['expense_amount']) ? (float) $parsed['expense_amount'] : null;
+        $expenseDate = $parsed['expense_date'] ?? null;
+        if ($expenseDate !== null && ! preg_match('/^\d{4}-\d{2}-\d{2}$/', $expenseDate)) {
+            $expenseDate = null;
+        }
+
+        return [
+            'intent' => $intent,
+            'category' => $category,
+            'month' => $month,
+            'expense_store' => $expenseStore,
+            'expense_amount' => $expenseAmount,
+            'expense_date' => $expenseDate,
+        ];
     }
 
     private function handleCategorySpend(array $intent, string $month): string
@@ -176,7 +292,7 @@ class ChatQueryService
     private function handleUnknown(): string
     {
         return "I can answer questions about your spending — try things like "
-            . '"how much did I spend on food this month" or "what\'s my biggest category?"';
+            . '"how much did I spend on food this month", "what\'s my biggest category?", or "add RM50 food expense at KFC".';
     }
 
     private function handleRecommendation(array $intent, string $month): string
